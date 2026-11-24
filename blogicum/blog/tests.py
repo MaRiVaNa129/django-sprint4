@@ -47,6 +47,83 @@ class AccessTests(TestCase):
         )
         self.assertContains(response, self.post.title)
 
+    def test_author_can_save_publish_and_unpublish_draft(self):
+        self.client.force_login(self.author)
+        profile_url = reverse('blog:profile', args=[self.author.username])
+        response = self.client.get(reverse('blog:create_post'))
+        self.assertContains(response, 'name="is_published"')
+        self.assertTrue(response.context['form']['is_published'].value())
+        data = {
+            'title': 'Publication lifecycle',
+            'text': 'Draft text',
+            'pub_date': (timezone.now() - timedelta(days=1)).strftime(
+                '%Y-%m-%dT%H:%M',
+            ),
+            'category': self.category.pk,
+        }
+        response = self.client.post(reverse('blog:create_post'), data)
+        self.assertRedirects(response, profile_url)
+        post = Post.objects.get(title=data['title'])
+        self.assertEqual(post.author, self.author)
+        self.assertFalse(post.is_published)
+        detail_url = reverse('blog:post_detail', args=[post.pk])
+        edit_url = reverse('blog:edit_post', args=[post.pk])
+        public_urls = (
+            reverse('blog:index'), profile_url,
+            reverse('blog:category_posts', args=[self.category.slug]),
+        )
+        visitor = Client()
+        for published in (False, True, False):
+            with self.subTest(is_published=published):
+                if published:
+                    data['is_published'] = 'on'
+                else:
+                    data.pop('is_published', None)
+                self.assertRedirects(
+                    self.client.post(edit_url, data), detail_url,
+                )
+                post.refresh_from_db()
+                self.assertEqual(post.is_published, published)
+                self.assertEqual(Post.objects.count(), 2)
+                response = self.client.get(edit_url)
+                self.assertEqual(
+                    response.context['form']['is_published'].value(),
+                    published,
+                )
+                self.assertContains(self.client.get(profile_url), post.title)
+                self.assertContains(self.client.get(detail_url), post.title)
+                for url in public_urls:
+                    response = visitor.get(url)
+                    if published:
+                        self.assertContains(response, post.title)
+                    else:
+                        self.assertNotContains(response, post.title)
+                self.assertEqual(
+                    visitor.get(detail_url).status_code,
+                    200 if published else 404,
+                )
+
+    def test_other_user_cannot_publish_draft(self):
+        self.post.is_published = False
+        self.post.save()
+        self.client.force_login(self.other)
+        response = self.client.post(reverse('blog:edit_post', args=[
+            self.post.pk,
+        ]), {
+            'title': self.post.title,
+            'text': self.post.text,
+            'pub_date': self.post.pub_date.isoformat(),
+            'category': self.category.pk,
+            'is_published': 'on',
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse('blog:post_detail', args=[
+            self.post.pk,
+        ]))
+        self.post.refresh_from_db()
+        self.assertFalse(self.post.is_published)
+        self.assertEqual(self.post.author, self.author)
+
     def test_comment_url_must_match_its_post(self):
         self.client.force_login(self.author)
         for name in ('edit_comment', 'delete_comment'):
